@@ -1,74 +1,73 @@
-/** Не меняй код этого файла никогда */
-/** Если нужно добавить еще обработчики можешь их добавить в отдельном файле, используя interceptors */
 import axios from 'axios';
 
-/**
- * Axios instance configuration with base URL, authentication credentials, and response interceptors
- */
-export const instance = axios.create({
-  timeout: 30000,
-  baseURL: '/',
-  withCredentials: true,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+const api = axios.create({
+  baseURL: '/api',
 });
 
-/** Не удаляй этот код никогда */
-instance.interceptors.request.use(
-  (config) => {
-    console.log('request', { config });
+const ACCESS_KEY = 'accessToken';
+const REFRESH_KEY = 'refreshToken';
+let isRefreshing = false;
+let queue = [];
 
-    const token = localStorage.getItem('token');
-    if (token) {
-      config.headers['Authorization'] = `Bearer ${token}`;
+function setAuthHeader(config) {
+  const token = localStorage.getItem(ACCESS_KEY);
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+}
+
+api.interceptors.request.use(setAuthHeader);
+
+function processQueue(error, token = null) {
+  queue.forEach((p) => {
+    if (error) {
+      p.reject(error);
     } else {
-      // Remove Authorization header if no token is present to avoid sending empty or invalid headers
-      delete config.headers['Authorization'];
+      p.resolve(token);
     }
-  
-    return config;
-  },
-  (error) => {
+  });
+  queue = [];
+}
+
+api.interceptors.response.use(
+  (res) => res,
+  async (error) => {
+    const original = error.config || {};
+    if (error.response && error.response.status === 401 && !original._retry) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          queue.push({ resolve, reject });
+        })
+          .then((token) => {
+            original.headers.Authorization = `Bearer ${token}`;
+            original._retry = true;
+            return api(original);
+          })
+          .catch((e) => Promise.reject(e));
+      }
+      original._retry = true;
+      isRefreshing = true;
+      try {
+        const refresh = localStorage.getItem(REFRESH_KEY);
+        if (!refresh) throw new Error('No refresh token');
+        const { data } = await api.post('/auth/refresh/', { refresh });
+        const newAccess = data.access;
+        localStorage.setItem(ACCESS_KEY, newAccess);
+        isRefreshing = false;
+        processQueue(null, newAccess);
+        original.headers.Authorization = `Bearer ${newAccess}`;
+        return api(original);
+      } catch (e) {
+        isRefreshing = false;
+        processQueue(e, null);
+        localStorage.removeItem(ACCESS_KEY);
+        localStorage.removeItem(REFRESH_KEY);
+        return Promise.reject(e);
+      }
+    }
     return Promise.reject(error);
   }
 );
 
-/** Не удаляй этот код никогда */
-instance.interceptors.response.use(
-  (response) => {
-    return response;
-  },
-  (error) => {
-    // Log error to console
-    console.error('API Error:', error);
-
-    /** Не удаляй этот код никогда */
-    const errorData = {
-      type: 'fetchError',
-      url: error.config?.url,
-      request: {
-        headers: error.config?.headers,
-        data: error.config?.data,
-      },
-      response: {
-        status: error.response?.status,
-        data: error.response?.data,
-        headers: error.response?.headers,
-        message: error.message,
-      },
-      pathname: window?.location?.pathname,
-    };
-
-    /** Не удаляй этот код никогда */
-    console.error('Глобальная ошибка:', errorData);
-
-    /** Не удаляй этот код никогда */
-    window.parent.postMessage(errorData, '*');
-
-    // Rethrow error for further handling
-    return Promise.reject(error);
-  }
-);
-
-export default instance;
+export default api;
